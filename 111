@@ -1,7 +1,5 @@
 --[[
-    Roblox Script Dumper - Профессиональный инструмент для анализа и дампинга
-    Мониторинг всех вызовов функций, HTTP-запросов, метаметодов
-    С обходом детекций и стелс-режимом
+1
 ]]
 
 local RobloxDumper = {}
@@ -164,8 +162,12 @@ end
 local function hookHTTP()
     if not CONFIG.monitorHTTP then return end
     
-    -- HttpService (только JSONEncode/JSONDecode доступны на клиенте)
-    local HttpService = game:GetService("HttpService")
+    -- ВАЖНО: HttpService:GetAsync/PostAsync НЕ доступны на клиенте!
+    -- На клиенте доступны только JSONEncode/JSONDecode
+    -- Для HTTP запросов используем эксплоит-функции: game:HttpGet, request, http_request
+    
+    -- Проверяем наличие эксплоит-функций
+    local hasExploitFunctions = game.HttpGet or request or http_request
     
     -- Хук game:HttpGet (эксплоит-функция)
     if game.HttpGet and not originalFunctions.HttpGet then
