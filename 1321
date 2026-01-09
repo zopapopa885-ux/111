@@ -417,7 +417,6 @@ function RobloxDumper:init(config)
     -- Установка хуков
     hookHTTP()
     hookRemotes()
-    hookMetamethods()
     hookGlobals()
     
     isInitialized = true
