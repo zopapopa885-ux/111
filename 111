@@ -164,55 +164,87 @@ end
 local function hookHTTP()
     if not CONFIG.monitorHTTP then return end
     
-    -- HttpService
+    -- HttpService (только JSONEncode/JSONDecode доступны на клиенте)
     local HttpService = game:GetService("HttpService")
-    if HttpService then
-        -- GetAsync
-        if not originalFunctions.HttpGetAsync then
-            originalFunctions.HttpGetAsync = HttpService.GetAsync
-            HttpService.GetAsync = function(self, url, ...)
+    
+    -- Хук game:HttpGet (эксплоит-функция)
+    if game.HttpGet and not originalFunctions.HttpGet then
+        originalFunctions.HttpGet = game.HttpGet
+        local oldHttpGet = game.HttpGet
+        
+        -- Используем hookfunction если доступен (для эксплоитов)
+        if hookfunction then
+            hookfunction(game.HttpGet, function(self, url, ...)
                 local args = formatValue({url = url, ...})
-                local results = {pcall(originalFunctions.HttpGetAsync, self, url, ...)}
+                local results = {pcall(oldHttpGet, self, url, ...)}
                 local success = table.remove(results, 1)
                 
-                addLog("HTTP_GET", "HttpService:GetAsync", args, 
+                addLog("HTTP_GET", "game:HttpGet", args, 
                     success and "SUCCESS: " .. string.sub(tostring(results[1]), 1, 100) or "ERROR: " .. tostring(results[1]),
                     {url = url, method = "GET"})
                 
                 if success then return unpack(results) else error(results[1]) end
-            end
+            end)
         end
+    end
+    
+    -- Хук game:HttpGetAsync (эксплоит-функция)
+    if game.HttpGetAsync and not originalFunctions.HttpGetAsync then
+        originalFunctions.HttpGetAsync = game.HttpGetAsync
+        local oldHttpGetAsync = game.HttpGetAsync
         
-        -- PostAsync
-        if not originalFunctions.HttpPostAsync then
-            originalFunctions.HttpPostAsync = HttpService.PostAsync
-            HttpService.PostAsync = function(self, url, data, ...)
-                local args = formatValue({url = url, data = data, ...})
-                local results = {pcall(originalFunctions.HttpPostAsync, self, url, data, ...)}
+        if hookfunction then
+            hookfunction(game.HttpGetAsync, function(self, url, ...)
+                local args = formatValue({url = url, ...})
+                local results = {pcall(oldHttpGetAsync, self, url, ...)}
                 local success = table.remove(results, 1)
                 
-                addLog("HTTP_POST", "HttpService:PostAsync", args,
+                addLog("HTTP_GET_ASYNC", "game:HttpGetAsync", args, 
+                    success and "SUCCESS: " .. string.sub(tostring(results[1]), 1, 100) or "ERROR: " .. tostring(results[1]),
+                    {url = url, method = "GET"})
+                
+                if success then return unpack(results) else error(results[1]) end
+            end)
+        end
+    end
+    
+    -- Хук game:HttpPost (эксплоит-функция)
+    if game.HttpPost and not originalFunctions.HttpPost then
+        originalFunctions.HttpPost = game.HttpPost
+        local oldHttpPost = game.HttpPost
+        
+        if hookfunction then
+            hookfunction(game.HttpPost, function(self, url, data, ...)
+                local args = formatValue({url = url, data = data, ...})
+                local results = {pcall(oldHttpPost, self, url, data, ...)}
+                local success = table.remove(results, 1)
+                
+                addLog("HTTP_POST", "game:HttpPost", args,
                     success and "SUCCESS: " .. string.sub(tostring(results[1]), 1, 100) or "ERROR: " .. tostring(results[1]),
                     {url = url, method = "POST", data = data})
                 
                 if success then return unpack(results) else error(results[1]) end
-            end
+            end)
         end
+    end
+    
+    -- Хук game:HttpPostAsync (эксплоит-функция)
+    if game.HttpPostAsync and not originalFunctions.HttpPostAsync then
+        originalFunctions.HttpPostAsync = game.HttpPostAsync
+        local oldHttpPostAsync = game.HttpPostAsync
         
-        -- RequestAsync
-        if not originalFunctions.HttpRequestAsync then
-            originalFunctions.HttpRequestAsync = HttpService.RequestAsync
-            HttpService.RequestAsync = function(self, options)
-                local args = formatValue(options)
-                local results = {pcall(originalFunctions.HttpRequestAsync, self, options)}
+        if hookfunction then
+            hookfunction(game.HttpPostAsync, function(self, url, data, ...)
+                local args = formatValue({url = url, data = data, ...})
+                local results = {pcall(oldHttpPostAsync, self, url, data, ...)}
                 local success = table.remove(results, 1)
                 
-                addLog("HTTP_REQUEST", "HttpService:RequestAsync", args,
-                    success and formatValue(results[1]) or "ERROR: " .. tostring(results[1]),
-                    {url = options.Url, method = options.Method, headers = options.Headers})
+                addLog("HTTP_POST_ASYNC", "game:HttpPostAsync", args,
+                    success and "SUCCESS: " .. string.sub(tostring(results[1]), 1, 100) or "ERROR: " .. tostring(results[1]),
+                    {url = url, method = "POST", data = data})
                 
                 if success then return unpack(results) else error(results[1]) end
-            end
+            end)
         end
     end
     
