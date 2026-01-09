@@ -1,0 +1,596 @@
+--[[
+1
+]]
+
+local RobloxDumper = {}
+RobloxDumper.__index = RobloxDumper
+
+-- Конфигурация
+local CONFIG = {
+    enabled = false,
+    logToConsole = true,
+    logToFile = false,
+    maxLogSize = 10000,
+    stealthMode = true,
+    monitorHTTP = true,
+    monitorMetamethods = true,
+    monitorGlobals = true,
+    monitorRemotes = true,
+    filterPatterns = {},
+    excludePatterns = {"^_G%.dumper"}
+}
+
+-- Хранилище логов
+local logs = {}
+local originalFunctions = {}
+local hookedFunctions = {}
+local isInitialized = false
+
+-- Утилиты для обхода детекций
+local function getOriginalFunction(func)
+    return originalFunctions[func] or func
+end
+
+local function safeCall(func, ...)
+    local success, result = pcall(func, ...)
+    if success then
+        return result
+    end
+    return nil
+end
+
+-- Генерация уникального ID для вызова
+local callCounter = 0
+local function generateCallId()
+    callCounter = callCounter + 1
+    return string.format("CALL_%d_%d", tick(), callCounter)
+end
+
+-- Форматирование аргументов
+local function formatValue(value, depth)
+    depth = depth or 0
+    if depth > 3 then return "..." end
+    
+    local valueType = type(value)
+    
+    if valueType == "string" then
+        return string.format("%q", value)
+    elseif valueType == "number" or valueType == "boolean" then
+        return tostring(value)
+    elseif valueType == "nil" then
+        return "nil"
+    elseif valueType == "function" then
+        return "function: " .. tostring(value)
+    elseif valueType == "table" then
+        local items = {}
+        local count = 0
+        for k, v in pairs(value) do
+            count = count + 1
+            if count > 5 then
+                table.insert(items, "...")
+                break
+            end
+            table.insert(items, string.format("[%s] = %s", formatValue(k, depth + 1), formatValue(v, depth + 1)))
+        end
+        return "{" .. table.concat(items, ", ") .. "}"
+    elseif valueType == "userdata" then
+        local success, result = pcall(function() return tostring(value) end)
+        return success and result or "userdata"
+    else
+        return tostring(value)
+    end
+end
+
+local function formatArgs(...)
+    local args = {...}
+    local formatted = {}
+    for i, arg in ipairs(args) do
+        table.insert(formatted, formatValue(arg))
+    end
+    return table.concat(formatted, ", ")
+end
+
+-- Логирование
+local function addLog(logType, functionName, args, result, extra)
+    if not CONFIG.enabled then return end
+    
+    -- Проверка фильтров
+    for _, pattern in ipairs(CONFIG.excludePatterns) do
+        if string.match(functionName, pattern) then
+            return
+        end
+    end
+    
+    local logEntry = {
+        id = generateCallId(),
+        timestamp = tick(),
+        type = logType,
+        function_name = functionName,
+        arguments = args,
+        result = result,
+        extra = extra or {},
+        stack = debug.traceback("", 2)
+    }
+    
+    table.insert(logs, logEntry)
+    
+    -- Ограничение размера логов
+    if #logs > CONFIG.maxLogSize then
+        table.remove(logs, 1)
+    end
+    
+    -- Вывод в консоль
+    if CONFIG.logToConsole then
+        local output = string.format(
+            "[%s] %s | %s(%s) -> %s",
+            logEntry.id,
+            logType,
+            functionName,
+            args,
+            result
+        )
+        print(output)
+        
+        if extra and next(extra) then
+            print("  Extra:", formatValue(extra))
+        end
+    end
+end
+
+-- Создание хука для функции
+local function createHook(originalFunc, functionName, hookType)
+    return function(...)
+        local args = {...}
+        local formattedArgs = formatArgs(...)
+        
+        local results = {pcall(originalFunc, ...)}
+        local success = table.remove(results, 1)
+        
+        local formattedResult = success and formatArgs(unpack(results)) or "ERROR: " .. tostring(results[1])
+        
+        addLog(hookType or "FUNCTION", functionName, formattedArgs, formattedResult)
+        
+        if success then
+            return unpack(results)
+        else
+            error(results[1])
+        end
+    end
+end
+
+-- HTTP мониторинг
+local function hookHTTP()
+    if not CONFIG.monitorHTTP then return end
+    
+    -- ВАЖНО: HttpService:GetAsync/PostAsync НЕ доступны на клиенте!
+    -- На клиенте доступны только JSONEncode/JSONDecode
+    -- Для HTTP запросов используем эксплоит-функции: game:HttpGet, request, http_request
+    
+    -- Проверяем наличие эксплоит-функций
+    local hasExploitFunctions = game.HttpGet or request or http_request
+    
+    -- Хук game:HttpGet (эксплоит-функция)
+    if game.HttpGet and not originalFunctions.HttpGet then
+        originalFunctions.HttpGet = game.HttpGet
+        local oldHttpGet = game.HttpGet
+        
+        -- Используем hookfunction если доступен (для эксплоитов)
+        if hookfunction then
+            hookfunction(game.HttpGet, function(self, url, ...)
+                local args = formatValue({url = url, ...})
+                local results = {pcall(oldHttpGet, self, url, ...)}
+                local success = table.remove(results, 1)
+                
+                addLog("HTTP_GET", "game:HttpGet", args, 
+                    success and "SUCCESS: " .. string.sub(tostring(results[1]), 1, 100) or "ERROR: " .. tostring(results[1]),
+                    {url = url, method = "GET"})
+                
+                if success then return unpack(results) else error(results[1]) end
+            end)
+        end
+    end
+    
+    -- Хук game:HttpGetAsync (эксплоит-функция)
+    if game.HttpGetAsync and not originalFunctions.HttpGetAsync then
+        originalFunctions.HttpGetAsync = game.HttpGetAsync
+        local oldHttpGetAsync = game.HttpGetAsync
+        
+        if hookfunction then
+            hookfunction(game.HttpGetAsync, function(self, url, ...)
+                local args = formatValue({url = url, ...})
+                local results = {pcall(oldHttpGetAsync, self, url, ...)}
+                local success = table.remove(results, 1)
+                
+                addLog("HTTP_GET_ASYNC", "game:HttpGetAsync", args, 
+                    success and "SUCCESS: " .. string.sub(tostring(results[1]), 1, 100) or "ERROR: " .. tostring(results[1]),
+                    {url = url, method = "GET"})
+                
+                if success then return unpack(results) else error(results[1]) end
+            end)
+        end
+    end
+    
+    -- Хук game:HttpPost (эксплоит-функция)
+    if game.HttpPost and not originalFunctions.HttpPost then
+        originalFunctions.HttpPost = game.HttpPost
+        local oldHttpPost = game.HttpPost
+        
+        if hookfunction then
+            hookfunction(game.HttpPost, function(self, url, data, ...)
+                local args = formatValue({url = url, data = data, ...})
+                local results = {pcall(oldHttpPost, self, url, data, ...)}
+                local success = table.remove(results, 1)
+                
+                addLog("HTTP_POST", "game:HttpPost", args,
+                    success and "SUCCESS: " .. string.sub(tostring(results[1]), 1, 100) or "ERROR: " .. tostring(results[1]),
+                    {url = url, method = "POST", data = data})
+                
+                if success then return unpack(results) else error(results[1]) end
+            end)
+        end
+    end
+    
+    -- Хук game:HttpPostAsync (эксплоит-функция)
+    if game.HttpPostAsync and not originalFunctions.HttpPostAsync then
+        originalFunctions.HttpPostAsync = game.HttpPostAsync
+        local oldHttpPostAsync = game.HttpPostAsync
+        
+        if hookfunction then
+            hookfunction(game.HttpPostAsync, function(self, url, data, ...)
+                local args = formatValue({url = url, data = data, ...})
+                local results = {pcall(oldHttpPostAsync, self, url, data, ...)}
+                local success = table.remove(results, 1)
+                
+                addLog("HTTP_POST_ASYNC", "game:HttpPostAsync", args,
+                    success and "SUCCESS: " .. string.sub(tostring(results[1]), 1, 100) or "ERROR: " .. tostring(results[1]),
+                    {url = url, method = "POST", data = data})
+                
+                if success then return unpack(results) else error(results[1]) end
+            end)
+        end
+    end
+    
+    -- request (syn/krnl)
+    if request and not originalFunctions.request then
+        originalFunctions.request = request
+        getgenv().request = function(options)
+            local args = formatValue(options)
+            local results = {pcall(originalFunctions.request, options)}
+            local success = table.remove(results, 1)
+            
+            addLog("HTTP_REQUEST", "request", args,
+                success and formatValue(results[1]) or "ERROR: " .. tostring(results[1]),
+                {url = options.Url, method = options.Method})
+            
+            if success then return unpack(results) else error(results[1]) end
+        end
+    end
+    
+    -- http_request
+    if http_request and not originalFunctions.http_request then
+        originalFunctions.http_request = http_request
+        getgenv().http_request = function(options)
+            local args = formatValue(options)
+            local results = {pcall(originalFunctions.http_request, options)}
+            local success = table.remove(results, 1)
+            
+            addLog("HTTP_REQUEST", "http_request", args,
+                success and formatValue(results[1]) or "ERROR: " .. tostring(results[1]),
+                {url = options.Url, method = options.Method})
+            
+            if success then return unpack(results) else error(results[1]) end
+        end
+    end
+end
+
+-- Remote мониторинг (RemoteEvent, RemoteFunction)
+local function hookRemotes()
+    if not CONFIG.monitorRemotes then return end
+    
+    -- FireServer
+    local oldFireServer = game.FindFirstChildOfClass(game, "RemoteEvent") and 
+                         game:FindFirstChildOfClass("RemoteEvent").FireServer
+    
+    if oldFireServer and not originalFunctions.FireServer then
+        originalFunctions.FireServer = oldFireServer
+        
+        local mt = getrawmetatable(game)
+        local oldNamecall = mt.__namecall
+        setreadonly(mt, false)
+        
+        mt.__namecall = newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+            local args = {...}
+            
+            if method == "FireServer" and self:IsA("RemoteEvent") then
+                addLog("REMOTE_FIRE", self:GetFullName() .. ":FireServer", 
+                    formatArgs(...), "void",
+                    {remote_type = "RemoteEvent", remote_name = self.Name})
+            elseif method == "InvokeServer" and self:IsA("RemoteFunction") then
+                local results = {pcall(oldNamecall, self, ...)}
+                local success = table.remove(results, 1)
+                
+                addLog("REMOTE_INVOKE", self:GetFullName() .. ":InvokeServer",
+                    formatArgs(...), 
+                    success and formatArgs(unpack(results)) or "ERROR: " .. tostring(results[1]),
+                    {remote_type = "RemoteFunction", remote_name = self.Name})
+                
+                if success then return unpack(results) else error(results[1]) end
+            end
+            
+            return oldNamecall(self, ...)
+        end)
+        
+        setreadonly(mt, true)
+    end
+end
+
+-- Мониторинг метаметодов
+local function hookMetamethods()
+    if not CONFIG.monitorMetamethods then return end
+    
+    local mt = getrawmetatable(game)
+    if not mt then return end
+    
+    setreadonly(mt, false)
+    
+    -- __index
+    if not originalFunctions.__index then
+        originalFunctions.__index = mt.__index
+        mt.__index = newcclosure(function(t, k)
+            local result = originalFunctions.__index(t, k)
+            
+            if CONFIG.stealthMode then
+                -- Не логируем частые обращения
+                if type(k) == "string" and not string.match(k, "^_") then
+                    addLog("METAMETHOD", "__index", formatValue({table = t, key = k}), formatValue(result))
+                end
+            end
+            
+            return result
+        end)
+    end
+    
+    -- __newindex
+    if not originalFunctions.__newindex then
+        originalFunctions.__newindex = mt.__newindex
+        mt.__newindex = newcclosure(function(t, k, v)
+            addLog("METAMETHOD", "__newindex", 
+                formatValue({table = t, key = k, value = v}), "void")
+            
+            return originalFunctions.__newindex(t, k, v)
+        end)
+    end
+    
+    setreadonly(mt, true)
+end
+
+-- Мониторинг глобальных функций
+local function hookGlobals()
+    if not CONFIG.monitorGlobals then return end
+    
+    local globalsToHook = {
+        "loadstring", "require", "spawn", "delay", "wait",
+        "print", "warn", "error", "assert"
+    }
+    
+    for _, funcName in ipairs(globalsToHook) do
+        local func = getgenv()[funcName] or _G[funcName]
+        if func and type(func) == "function" and not originalFunctions[funcName] then
+            originalFunctions[funcName] = func
+            local hooked = createHook(func, funcName, "GLOBAL")
+            getgenv()[funcName] = hooked
+            _G[funcName] = hooked
+        end
+    end
+    
+    -- Специальная обработка loadstring
+    if loadstring and not originalFunctions.loadstring_special then
+        originalFunctions.loadstring_special = loadstring
+        getgenv().loadstring = function(source, chunkname)
+            addLog("LOADSTRING", "loadstring", 
+                string.sub(source, 1, 200) .. (string.len(source) > 200 and "..." or ""),
+                "function",
+                {chunk_name = chunkname, source_length = string.len(source)})
+            
+            return originalFunctions.loadstring_special(source, chunkname)
+        end
+    end
+end
+
+-- Инициализация дампера
+function RobloxDumper:init(config)
+    if isInitialized then
+        warn("Dumper already initialized")
+        return self
+    end
+    
+    -- Применение конфигурации
+    if config then
+        for k, v in pairs(config) do
+            CONFIG[k] = v
+        end
+    end
+    
+    print("[Dumper] Initializing...")
+    
+    -- Установка хуков
+    hookHTTP()
+    hookRemotes()
+    hookMetamethods()
+    hookGlobals()
+    
+    isInitialized = true
+    print("[Dumper] Initialized successfully")
+    
+    return self
+end
+
+-- Включение/выключение дампера
+function RobloxDumper:toggle()
+    CONFIG.enabled = not CONFIG.enabled
+    print("[Dumper]", CONFIG.enabled and "Enabled" or "Disabled")
+    return CONFIG.enabled
+end
+
+function RobloxDumper:enable()
+    CONFIG.enabled = true
+    print("[Dumper] Enabled")
+end
+
+function RobloxDumper:disable()
+    CONFIG.enabled = false
+    print("[Dumper] Disabled")
+end
+
+-- Получение логов
+function RobloxDumper:getLogs(filter)
+    if not filter then
+        return logs
+    end
+    
+    local filtered = {}
+    for _, log in ipairs(logs) do
+        if log.type == filter then
+            table.insert(filtered, log)
+        end
+    end
+    return filtered
+end
+
+-- Очистка логов
+function RobloxDumper:clearLogs()
+    logs = {}
+    print("[Dumper] Logs cleared")
+end
+
+-- Экспорт логов
+function RobloxDumper:exportLogs(format)
+    format = format or "text"
+    
+    if format == "text" then
+        local output = {}
+        table.insert(output, "=== ROBLOX DUMPER LOGS ===")
+        table.insert(output, "Total logs: " .. #logs)
+        table.insert(output, "")
+        
+        for _, log in ipairs(logs) do
+            table.insert(output, string.format("[%s] %s", log.id, log.type))
+            table.insert(output, string.format("  Function: %s", log.function_name))
+            table.insert(output, string.format("  Args: %s", log.arguments))
+            table.insert(output, string.format("  Result: %s", log.result))
+            if next(log.extra) then
+                table.insert(output, string.format("  Extra: %s", formatValue(log.extra)))
+            end
+            table.insert(output, "")
+        end
+        
+        return table.concat(output, "\n")
+    elseif format == "json" then
+        local HttpService = game:GetService("HttpService")
+        return HttpService:JSONEncode(logs)
+    end
+end
+
+-- Статистика
+function RobloxDumper:getStats()
+    local stats = {
+        total = #logs,
+        by_type = {}
+    }
+    
+    for _, log in ipairs(logs) do
+        stats.by_type[log.type] = (stats.by_type[log.type] or 0) + 1
+    end
+    
+    return stats
+end
+
+-- Добавление кастомного хука
+function RobloxDumper:hookFunction(func, name)
+    if type(func) ~= "function" then
+        error("First argument must be a function")
+    end
+    
+    name = name or "CustomFunction"
+    
+    if not originalFunctions[name] then
+        originalFunctions[name] = func
+        return createHook(func, name, "CUSTOM")
+    end
+    
+    return func
+end
+
+-- GUI для управления (опционально)
+function RobloxDumper:createGUI()
+    -- Минималистичный GUI
+    local ScreenGui = Instance.new("ScreenGui")
+    ScreenGui.Name = "DumperGUI"
+    ScreenGui.ResetOnSpawn = false
+    ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(0, 300, 0, 150)
+    Frame.Position = UDim2.new(1, -320, 0, 20)
+    Frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    Frame.BorderSizePixel = 0
+    Frame.Parent = ScreenGui
+    
+    local UICorner = Instance.new("UICorner")
+    UICorner.CornerRadius = UDim.new(0, 8)
+    UICorner.Parent = Frame
+    
+    local Title = Instance.new("TextLabel")
+    Title.Size = UDim2.new(1, 0, 0, 30)
+    Title.BackgroundTransparency = 1
+    Title.Text = "Roblox Dumper"
+    Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Title.TextSize = 16
+    Title.Font = Enum.Font.GothamBold
+    Title.Parent = Frame
+    
+    local ToggleButton = Instance.new("TextButton")
+    ToggleButton.Size = UDim2.new(0.9, 0, 0, 35)
+    ToggleButton.Position = UDim2.new(0.05, 0, 0, 40)
+    ToggleButton.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+    ToggleButton.Text = CONFIG.enabled and "Disable" or "Enable"
+    ToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    ToggleButton.TextSize = 14
+    ToggleButton.Font = Enum.Font.Gotham
+    ToggleButton.Parent = Frame
+    
+    local ButtonCorner = Instance.new("UICorner")
+    ButtonCorner.CornerRadius = UDim.new(0, 6)
+    ButtonCorner.Parent = ToggleButton
+    
+    ToggleButton.MouseButton1Click:Connect(function()
+        self:toggle()
+        ToggleButton.Text = CONFIG.enabled and "Disable" or "Enable"
+        ToggleButton.BackgroundColor3 = CONFIG.enabled and Color3.fromRGB(0, 150, 0) or Color3.fromRGB(150, 0, 0)
+    end)
+    
+    local ClearButton = Instance.new("TextButton")
+    ClearButton.Size = UDim2.new(0.9, 0, 0, 35)
+    ClearButton.Position = UDim2.new(0.05, 0, 0, 85)
+    ClearButton.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+    ClearButton.Text = "Clear Logs"
+    ClearButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    ClearButton.TextSize = 14
+    ClearButton.Font = Enum.Font.Gotham
+    ClearButton.Parent = Frame
+    
+    local ClearCorner = Instance.new("UICorner")
+    ClearCorner.CornerRadius = UDim.new(0, 6)
+    ClearCorner.Parent = ClearButton
+    
+    ClearButton.MouseButton1Click:Connect(function()
+        self:clearLogs()
+    end)
+    
+    ScreenGui.Parent = game:GetService("CoreGui")
+    
+    print("[Dumper] GUI created")
+end
+
+return RobloxDumper
